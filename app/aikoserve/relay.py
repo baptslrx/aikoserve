@@ -32,7 +32,8 @@ DB_ERROR_PATTERNS = [rb"SQLSTATE\[HY000\] \[2002\]", rb"SQLSTATE\[HY000\] \[1045
                      rb"mysqli_sql_exception", rb"Error establishing a database connection",
                      rb"could not find driver", rb"mysqli_connect\(\)", rb"Connection refused.{0,80}mysql",
                      rb"SQLSTATE\[08006\]", rb"Class \"mysqli\" not found", rb"Class \"PDO\" not found",
-                     rb"Call to undefined function mysqli_connect"]
+                     rb"Call to undefined function mysqli_", rb"Call to undefined function mysql_",
+                     rb"Class \"PDO\" not found", rb"could not find driver"]
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
