@@ -1,0 +1,103 @@
+name: Compiler AikoServe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows
+          - os: ubuntu-22.04
+            name: Linux
+          - os: macos-14
+            name: Mac
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bibliothèques système (Linux)
+        if: matrix.name == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 fonts-dejavu-core
+      - name: Dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pillow
+      - name: Tests automatiques
+        timeout-minutes: 12
+        env:
+          QT_QPA_PLATFORM: ${{ matrix.name == 'Linux' && 'offscreen' || '' }}
+        run: |
+          mkdir -p screenshots
+          python tests/smoke.py 2>&1 | tee screenshots/rapport.txt
+      - name: Publier les captures et le rapport (branche captures-*)
+        if: always()
+        run: |
+          cd screenshots || exit 0
+          git init -q -b "captures-${{ matrix.name }}"
+          git -c user.name=ci -c user.email=ci@aikoserve add -A
+          git -c user.name=ci -c user.email=ci@aikoserve commit -q -m "Captures ${{ matrix.name }}" || exit 0
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" "HEAD:captures-${{ matrix.name }}"
+      - name: Compilation (PyInstaller)
+        run: |
+          ICON=../assets/icon.png
+          [ "${{ matrix.name }}" = "Windows" ] && ICON=../assets/icon.ico
+          pyinstaller --noconfirm --windowed --name AikoServe --icon "$ICON" \
+            --osx-bundle-identifier fr.aikographic.aikoserve \
+            --add-data "../assets/icon-256.png:assets" \
+            --collect-all segno \
+            run.py
+      - name: Archive Windows (installateur + portable)
+        if: matrix.name == 'Windows'
+        shell: pwsh
+        working-directory: .
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          $env:AIKOSERVE_VERSION = (python -c "import sys; sys.path.insert(0, 'app'); import aikoserve; print(aikoserve.__version__)")
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\aikoserve.iss
+          Compress-Archive -Path app\dist\AikoServe -DestinationPath dist\AikoServe-Windows-portable.zip
+      - name: Archive Linux
+        if: matrix.name == 'Linux'
+        working-directory: .
+        run: |
+          mkdir -p dist/pkg/AikoServe-Linux
+          cp -r app/dist/AikoServe dist/pkg/AikoServe-Linux/
+          cp packaging/install-linux.sh dist/pkg/AikoServe-Linux/installer.sh
+          tar -C dist/pkg -czf dist/AikoServe-Linux-x86_64.tar.gz AikoServe-Linux
+      - name: Archive Mac
+        if: matrix.name == 'Mac'
+        working-directory: .
+        run: |
+          mkdir -p dist
+          codesign --force --deep --sign - app/dist/AikoServe.app || true
+          ditto -c -k --sequesterRsrc --keepParent app/dist/AikoServe.app dist/AikoServe-Mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AikoServe-${{ matrix.name }}
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.tar.gz

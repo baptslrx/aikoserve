@@ -1,0 +1,2 @@
+PySide6-Essentials>=6.6
+segno>=1.6
