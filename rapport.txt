@@ -1,0 +1,50 @@
+== serveur
+  adresses : ['http://10.1.0.115:8080/', 'http://172.26.144.1:8080/'] ['10.1.0.115', '172.26.144.1']
+  ok   adresse(s) réseau
+  ok   page d'accueil
+  ok   script de rechargement ajouté avant </body>
+  ok   type CSS
+  ok   type module JS
+  ok   type SVG
+  ok   nom de fichier avec espace
+  ok   impossible de sortir du dossier du site
+  ok   adresse inconnue = 404
+  ok   mode application : retour sur index.html
+== rechargement
+  ok   CSS modifié → rechargement des styles seulement (reçu : css)
+  ok   HTML modifié → page rechargée (reçu : reload)
+  ok   node_modules ignoré
+  ok   appareil connecté compté
+== PHP intégré
+  PHP : D:\a\aikoserve\aikoserve\app\php\php.exe
+  ok   PHP fourni avec l'appli
+  ok   site PHP + MySQL repéré
+   PHP 8.4.26
+  ok   page PHP exécutée (include compris)
+  ok   rechargement auto ajouté aux pages PHP
+  ok   formulaire (POST) traité
+  ok   base de données injoignable repérée
+  ok   fichier PHP modifié → page rechargée (reçu : reload)
+  ok   WordPress repéré
+  ok   SQLite : pas d'alerte (fonctionne en mode intégré)
+== relais
+  ok   adresses localhost réécrites
+  ok   lien CSS réécrit vers l'adresse du relais
+  ok   rechargement auto ajouté au site relayé
+  ok   redirection réécrite (http://127.0.0.1:8095/)
+  ok   serveur éteint → page d'explication
+== fenêtre
+  ok   QR code généré
+  ok   le serveur de la fenêtre répond
+  ok   bandeau base de données affiché
+  ok   mode PHP affiché (PHP 8.4.26)
+  ok   « Passer en mode relais » prépare le relais
+  ok   QR code généré
+  ok   le serveur de la fenêtre répond
+  ok   bandeau base de données affiché
+  ok   mode PHP affiché (PHP 8.4.26)
+  ok   « Passer en mode relais » prépare le relais
+
+Captures : fenetre-clair.png, fenetre-relais-clair.png, fenetre-relais-sombre.png, fenetre-sombre.png, fenetre-vide-clair.png, fenetre-vide-sombre.png, fenetre-wordpress-clair.png, fenetre-wordpress-sombre.png
+
+Tout est OK
