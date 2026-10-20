@@ -146,6 +146,34 @@ class Watcher(threading.Thread):
         self._halt.set()
 
 
+def serve_events(handler: BaseHTTPRequestHandler, hub: "Hub", state: dict):
+    """Flux d'événements (Server-Sent Events) : le navigateur y apprend quand recharger."""
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.end_headers()
+    q = hub.add()
+    state["on_clients"]()
+    try:
+        handler.wfile.write(b": ok\n\n")
+        handler.wfile.flush()
+        while not state["stopping"]:
+            try:
+                event = q.get(timeout=15)
+                handler.wfile.write(f"event: {event}\ndata: {int(time.time())}\n\n".encode())
+            except queue.Empty:
+                handler.wfile.write(b": ping\n\n")  # garde la connexion ouverte
+            handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+        pass
+    finally:
+        hub.remove(q)
+        state["on_clients"]()
+        handler.close_connection = True
+
+
 def make_handler(root: Path, hub: Hub, state: dict):
     class Handler(BaseHTTPRequestHandler):
         server_version = "AikoServe"
@@ -154,31 +182,8 @@ def make_handler(root: Path, hub: Hub, state: dict):
         def log_message(self, *args):  # pas de journal dans la console
             pass
 
-        # ------------------------------------------------ événements (rechargement)
         def _events(self):
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.end_headers()
-            q = hub.add()
-            state["on_clients"]()
-            try:
-                self.wfile.write(b": ok\n\n")
-                self.wfile.flush()
-                while not state["stopping"]:
-                    try:
-                        event = q.get(timeout=15)
-                        self.wfile.write(f"event: {event}\ndata: {int(time.time())}\n\n".encode())
-                    except queue.Empty:
-                        self.wfile.write(b": ping\n\n")  # garde la connexion ouverte
-                    self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
-                pass
-            finally:
-                hub.remove(q)
-                state["on_clients"]()
-                self.close_connection = True
+            serve_events(self, hub, state)
 
         # ------------------------------------------------ fichiers
         def _resolve(self, url_path: str) -> Path | None:
@@ -282,6 +287,9 @@ def inject(html: bytes) -> bytes:
 
 
 class SiteServer:
+    kind = "static"
+    label = "Site statique"
+
     """Démarre/arrête le serveur d'un dossier. `on_reload(kind)` et `on_clients(n)` sont appelés
     depuis d'autres fils : l'interface doit les relayer (signaux Qt)."""
 

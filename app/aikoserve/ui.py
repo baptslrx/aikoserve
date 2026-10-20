@@ -6,10 +6,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRectF, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFontMetrics, QGuiApplication, QPainter
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
-                               QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+                               QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from . import __version__
+from .relay import PhpServer, RelayServer, detect_database, find_php, has_php, normalize_url
 from .server import SiteServer
 from .theme import ACCENT, ON_ACCENT, css, theme
 
@@ -17,6 +18,7 @@ from .theme import ACCENT, ON_ACCENT, css, theme
 class Bridge(QObject):
     reloaded = Signal(str)
     clients = Signal(int)
+    db_error = Signal()
 
 
 class QrView(QWidget):
@@ -68,7 +70,7 @@ class DropArea(QFrame):
         big = QLabel("Glisse le dossier de ton site ici")
         big.setObjectName("dropTitle")
         big.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        small = QLabel("ou clique pour le choisir · HTML, CSS, JS, images…")
+        small = QLabel("ou clique pour le choisir · HTML, CSS, JS, PHP…")
         small.setObjectName("hint")
         small.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(big)
@@ -92,12 +94,15 @@ class MainWindow(QWidget):
         self.setMinimumSize(440, 600)
         self.setAcceptDrops(True)
         self.settings = QSettings("Aikographic", "AikoServe")
-        self.server: SiteServer | None = None
+        self.server = None
+        self.pending_watch: Path | None = None
         self.n_clients = 0
         self.last_reload: float | None = None
         self.bridge = Bridge()
         self.bridge.reloaded.connect(self._reloaded)
         self.bridge.clients.connect(self._clients)
+        self.bridge.db_error.connect(lambda: self._show_db_warning(
+            "La base de données ne répond pas : ce site a besoin de MySQL."))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 18, 22, 18)
@@ -128,6 +133,28 @@ class MainWindow(QWidget):
         self.last_btn.setObjectName("ghost")
         self.last_btn.clicked.connect(self._reopen_last)
         el.addWidget(self.last_btn)
+        relay_card = QFrame()
+        relay_card.setObjectName("card")
+        rl = QVBoxLayout(relay_card)
+        rl.setContentsMargins(14, 10, 14, 12)
+        rl.setSpacing(8)
+        self.relay_hint = QLabel("Ton site tourne déjà (MAMP, Local, WordPress, Vite…) ? Indique son adresse :")
+        self.relay_hint.setObjectName("hint")
+        self.relay_hint.setWordWrap(True)
+        rrow = QHBoxLayout()
+        self.relay_input = QLineEdit()
+        self.relay_input.setObjectName("field")
+        self.relay_input.setPlaceholderText("http://localhost:8888")
+        self.relay_input.setText(self.settings.value("relay", "", type=str))
+        self.relay_input.returnPressed.connect(self._start_relay)
+        relay_btn = QPushButton("Relayer")
+        relay_btn.setObjectName("primary")
+        relay_btn.clicked.connect(self._start_relay)
+        rrow.addWidget(self.relay_input, 1)
+        rrow.addWidget(relay_btn)
+        rl.addWidget(self.relay_hint)
+        rl.addLayout(rrow)
+        el.addWidget(relay_card)
         self.stack.addWidget(empty)
 
         # Page 2 : site en ligne
@@ -150,9 +177,30 @@ class MainWindow(QWidget):
         names.addWidget(self.site_path)
         self.live_dot = QLabel("● En ligne")
         self.live_dot.setObjectName("live")
+        self.kind_label = QLabel()
+        self.kind_label.setObjectName("chip")
+        side = QVBoxLayout()
+        side.setSpacing(4)
+        side.addWidget(self.live_dot, 0, Qt.AlignmentFlag.AlignRight)
+        side.addWidget(self.kind_label, 0, Qt.AlignmentFlag.AlignRight)
         cl.addLayout(names, 1)
-        cl.addWidget(self.live_dot)
+        cl.addLayout(side)
         ll.addWidget(card)
+
+        self.warn = QFrame()
+        self.warn.setObjectName("warn")
+        wl = QHBoxLayout(self.warn)
+        wl.setContentsMargins(12, 8, 8, 8)
+        self.warn_text = QLabel()
+        self.warn_text.setObjectName("warnText")
+        self.warn_text.setWordWrap(True)
+        warn_btn = QPushButton("Passer en mode relais")
+        warn_btn.setObjectName("primary")
+        warn_btn.clicked.connect(self._go_relay)
+        wl.addWidget(self.warn_text, 1)
+        wl.addWidget(warn_btn)
+        self.warn.hide()
+        ll.addWidget(self.warn)
 
         self.qr = QrView()
         ll.addWidget(self.qr, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -184,6 +232,10 @@ class MainWindow(QWidget):
             row.addWidget(b)
         ll.addLayout(row)
 
+        self.watch_btn = QPushButton("Choisir le dossier à surveiller (rechargement auto)…")
+        self.watch_btn.setObjectName("ghost")
+        self.watch_btn.clicked.connect(self._choose_watch)
+        ll.addWidget(self.watch_btn)
         self.spa = QCheckBox("Mode application (React, Vue… : toutes les adresses mènent à index.html)")
         self.spa.setChecked(self.settings.value("spa", False, type=bool))
         self.spa.toggled.connect(self._toggle_spa)
@@ -228,6 +280,15 @@ class MainWindow(QWidget):
             QPushButton#ghost {{ background: transparent; color: {css(t['text'])}; border: 1px solid {css(t['line'])};
                                 border-radius: 8px; padding: 7px 12px; }}
             QPushButton#ghost:hover {{ border-color: {css(ACCENT)}; }}
+            QLabel#chip {{ color: {css(t['subtext'])}; font-size: 11px; border: 1px solid {css(t['line'])};
+                          border-radius: 5px; padding: 1px 6px; }}
+            QFrame#warn {{ background: rgba(255, 196, 0, 0.12); border: 1px solid rgba(255, 196, 0, 0.55);
+                          border-radius: 10px; }}
+            QFrame#warn QLabel {{ background: transparent; }}
+            QLabel#warnText {{ color: {css(t['text'])}; font-size: 12px; }}
+            QLineEdit#field {{ background: {css(t['bg'])}; border: 1px solid {css(t['line'])}; border-radius: 8px;
+                              padding: 7px 10px; font-size: 13px; }}
+            QLineEdit#field:focus {{ border-color: {css(ACCENT)}; }}
             QCheckBox {{ background: transparent; spacing: 7px; color: {css(t['subtext'])}; font-size: 12px; }}
             QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid {css(t['subtext'])}; }}
             QCheckBox::indicator:checked {{ background: {css(ACCENT)}; border-color: {css(ACCENT)}; }}
@@ -249,31 +310,106 @@ class MainWindow(QWidget):
         if not folder.is_dir():
             folder = folder.parent
         self.stop(show_empty=False)
+        port = int(self.settings.value("port", 8080))
+        php_site = has_php(folder)
         try:
-            self.server = SiteServer(folder, port=int(self.settings.value("port", 8080)), spa=self.spa.isChecked(),
-                                     on_reload=lambda kind: self.bridge.reloaded.emit(kind),
-                                     on_clients=lambda n: self.bridge.clients.emit(n))
+            if php_site:
+                if not find_php():
+                    QMessageBox.warning(self, "AikoServe", "Ce site est en PHP, mais PHP est introuvable.")
+                    self._show_empty()
+                    return
+                self.server = PhpServer(folder, port=port, **self._callbacks())
+            else:
+                self.server = SiteServer(folder, port=port, spa=self.spa.isChecked(),
+                                         on_reload=lambda kind: self.bridge.reloaded.emit(kind),
+                                         on_clients=lambda n: self.bridge.clients.emit(n))
             self.server.start()
         except OSError as e:
             QMessageBox.warning(self, "AikoServe", f"Impossible de démarrer le serveur :\n{e}")
             self.server = None
             self._show_empty()
             return
+        self.current_folder = folder
         self.settings.setValue("last", str(folder))
         self.site_name.setText(folder.name)
         fm = QFontMetrics(self.site_path.font())
         self.site_path.setText(fm.elidedText(str(folder), Qt.TextElideMode.ElideMiddle, 300))
         self.site_path.setToolTip(str(folder))
+        self._after_start()
+        if php_site:
+            db = detect_database(folder)
+            if db:
+                self._show_db_warning(f"{db} détecté. Le PHP intégré n'inclut pas de base de données : les pages qui "
+                                      "en ont besoin afficheront une erreur. Lance le site dans MAMP ou Local, puis "
+                                      "passe en mode relais.")
+        elif not (folder / "index.html").exists() and not (folder / "index.htm").exists():
+            self.status.setText("Pas de index.html : la liste des fichiers s'affichera.")
+
+    def _callbacks(self) -> dict:
+        return dict(on_reload=lambda kind: self.bridge.reloaded.emit(kind),
+                    on_clients=lambda n: self.bridge.clients.emit(n),
+                    on_db_error=lambda: self.bridge.db_error.emit())
+
+    def _after_start(self):
+        """Affiche la page « en ligne » selon le mode (statique, PHP, relais)."""
+        srv = self.server
+        self.kind_label.setText(srv.label)
+        self.warn.hide()
+        is_relay = srv.kind == "relay"
+        self.spa.setVisible(srv.kind == "static")
+        self.watch_btn.setVisible(is_relay)
+        if is_relay:
+            self.watch_btn.setText(f"Rechargement auto : {srv.root.name}  (changer…)" if srv.root
+                                   else "Choisir le dossier à surveiller (rechargement auto)…")
         self.url_box.blockSignals(True)
         self.url_box.clear()
-        self.url_box.addItems(self.server.urls())
+        self.url_box.addItems(srv.urls())
         self.url_box.blockSignals(False)
         self.qr.set_text(self.url_box.currentText())
         self.n_clients, self.last_reload = 0, None
-        if not (folder / "index.html").exists() and not (folder / "index.htm").exists():
-            self.status.setText("Pas de index.html : la liste des fichiers s'affichera.")
         self.stack.setCurrentIndex(1)
         self._refresh_status()
+
+    def _show_db_warning(self, text: str):
+        if self.server and self.server.kind == "relay" and not isinstance(self.server, PhpServer):
+            text = "La base de données ne répond pas : vérifie que MySQL est lancé (MAMP, Local…)."
+            self.warn.findChild(QPushButton).hide()
+        else:
+            self.warn.findChild(QPushButton).show()
+        self.warn_text.setText("⚠ " + text)
+        self.warn.show()
+
+    def _go_relay(self):
+        self.pending_watch = getattr(self, "current_folder", None)
+        self.stop()
+        self.relay_hint.setText("Lance d'abord ton site dans MAMP, Local… (avec sa base de données), puis indique "
+                                "son adresse ici. AikoServe surveillera le dossier pour recharger les pages.")
+        self.relay_input.setFocus()
+
+    def _start_relay(self):
+        url = normalize_url(self.relay_input.text() or self.relay_input.placeholderText())
+        self.settings.setValue("relay", url)
+        self.stop(show_empty=False)
+        try:
+            self.server = RelayServer(url, watch=self.pending_watch, port=int(self.settings.value("port", 8080)),
+                                      **self._callbacks())
+            self.server.start()
+        except OSError as e:
+            QMessageBox.warning(self, "AikoServe", f"Impossible de démarrer le relais :\n{e}")
+            self.server = None
+            self._show_empty()
+            return
+        self.site_name.setText(url.split("://", 1)[-1])
+        self.site_path.setText("Relais d'un serveur déjà lancé sur cet ordinateur")
+        self.site_path.setToolTip(url)
+        self._after_start()
+
+    def _choose_watch(self):
+        folder = QFileDialog.getExistingDirectory(self, "Dossier du site à surveiller")
+        if folder and self.server and self.server.kind == "relay":
+            self.server.watch(Path(folder))
+            self.pending_watch = Path(folder)
+            self.watch_btn.setText(f"Rechargement auto : {Path(folder).name}  (changer…)")
 
     def stop(self, show_empty: bool = True):
         if self.server:

@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from aikoserve import theme  # noqa: E402
+from aikoserve.relay import PhpServer, RelayServer, detect_database, find_php, has_php  # noqa: E402
 from aikoserve.server import SiteServer, local_addresses  # noqa: E402
 from aikoserve.ui import MainWindow  # noqa: E402
 
@@ -115,6 +116,100 @@ def main() -> int:
         check(max(clients or [0]) >= 1, "appareil connecté compté")
         s.stop()
 
+        print("== PHP intégré", flush=True)
+        php = find_php()
+        print("  PHP :", php)
+        check(php is not None, "PHP fourni avec l'appli")
+        psite = Path(tmp) / "site-php"
+        (psite / "inc").mkdir(parents=True)
+        (psite / "index.php").write_text('<?php include "inc/head.php"; ?><body><h1>Bonjour <?= 20 + 22 ?></h1>'
+                                         '<?php if ($_POST) echo "Recu: " . htmlspecialchars($_POST["n"]); ?>'
+                                         '</body></html>', encoding="utf-8")
+        (psite / "inc" / "head.php").write_text("<!doctype html><html><head><title>PHP</title></head>",
+                                                encoding="utf-8")
+        (psite / "db.php").write_text('<?php mysqli_report(MYSQLI_REPORT_OFF); $c = @new mysqli("127.0.0.1", '
+                                      '"root", "root", "x", 3399); if ($c->connect_errno) { echo "Warning: '
+                                      'mysqli_connect(): (HY000/2002): " . $c->connect_error; }', encoding="utf-8")
+        check(has_php(psite) and detect_database(psite) == "Connexion MySQL dans le code", "site PHP + MySQL repéré")
+        if php:
+            db_flags: list[int] = []
+            ps = PhpServer(psite, 8090, on_db_error=lambda: db_flags.append(1))
+            ps.start()
+            pbase = f"http://127.0.0.1:{ps.port}"
+            print("  ", ps.label)
+            st, ct, body = get(pbase, "/")
+            check(st == 200 and b"Bonjour 42" in body, "page PHP exécutée (include compris)")
+            check(b"/__aikoserve/events" in body, "rechargement auto ajouté aux pages PHP")
+            r = urllib.request.urlopen(urllib.request.Request(pbase + "/", data=b"n=salut"), timeout=10).read()
+            check(b"Recu: salut" in r, "formulaire (POST) traité")
+            get(pbase, "/db.php")
+            check(db_flags == [1], "base de données injoignable repérée")
+            ev = wait_event(pbase, lambda: (psite / "inc" / "head.php").write_text(
+                "<!doctype html><html><head><title>PHP 2</title></head>", encoding="utf-8"))
+            check(ev == "reload", f"fichier PHP modifié → page rechargée (reçu : {ev})")
+            ps.stop()
+        wp = Path(tmp) / "mon-wordpress"
+        wp.mkdir()
+        (wp / "index.php").write_text("<?php echo 'wp';", encoding="utf-8")
+        (wp / "wp-config.php").write_text("<?php define('DB_NAME', 'wp');", encoding="utf-8")
+        check(detect_database(wp) == "WordPress (base MySQL)", "WordPress repéré")
+        lite = Path(tmp) / "site-sqlite"
+        lite.mkdir()
+        (lite / "index.php").write_text('<?php $db = new PDO("sqlite:" . __DIR__ . "/d.db");', encoding="utf-8")
+        check(detect_database(lite) is None, "SQLite : pas d'alerte (fonctionne en mode intégré)")
+
+        print("== relais", flush=True)
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                p = self.server.server_address[1]
+                if self.path == "/old":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://localhost:{p}/")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                b = (f'<html><head><link rel=stylesheet href="http://localhost:{p}/s.css"></head><body>'
+                     f'<script>var u="http:\\/\\/localhost:{p}\\/api"</script></body></html>').encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Set-Cookie", "wp=1; path=/; domain=localhost")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+        up = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        upport = up.server_address[1]
+        rs = RelayServer(str(upport), watch=site, port=8095)
+        rs.start()
+        rbase = f"http://127.0.0.1:{rs.port}"
+        st, ct, body = get(rbase, "/")
+        check(st == 200 and f"localhost:{upport}".encode() not in body, "adresses localhost réécrites")
+        check(f"127.0.0.1:{rs.port}/s.css".encode() in body, "lien CSS réécrit vers l'adresse du relais")
+        check(b"/__aikoserve/events" in body, "rechargement auto ajouté au site relayé")
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None
+
+        try:
+            urllib.request.build_opener(NoRedirect).open(rbase + "/old", timeout=5)
+            loc = ""
+        except urllib.error.HTTPError as e:
+            loc = e.headers.get("Location", "")
+        check(loc == f"http://127.0.0.1:{rs.port}/", f"redirection réécrite ({loc})")
+        rs.stop()
+        bad = RelayServer("http://127.0.0.1:1", port=8096)
+        bad.start()
+        check(get(f"http://127.0.0.1:{bad.port}", "/")[0] == 502, "serveur éteint → page d'explication")
+        bad.stop()
+        up.shutdown()
+
         print("== fenêtre", flush=True)
         for dark in (True, False):
             theme.is_dark = lambda dark=dark: dark
@@ -131,6 +226,16 @@ def main() -> int:
             w.grab().save(str(shots / f"fenetre-{'sombre' if dark else 'clair'}.png"))
             st, _, _ = get(f"http://127.0.0.1:{w.server.port}", "/")
             check(st == 200, "le serveur de la fenêtre répond")
+            if php:
+                w.serve(wp)
+                app.processEvents()
+                check(w.warn.isVisible() and "WordPress" in w.warn_text.text(), "bandeau base de données affiché")
+                check(w.kind_label.text().startswith("PHP"), f"mode PHP affiché ({w.kind_label.text()})")
+                w.grab().save(str(shots / f"fenetre-wordpress-{'sombre' if dark else 'clair'}.png"))
+                w._go_relay()
+                app.processEvents()
+                check(w.stack.currentIndex() == 0 and w.pending_watch == wp, "« Passer en mode relais » prépare le relais")
+                w.grab().save(str(shots / f"fenetre-relais-{'sombre' if dark else 'clair'}.png"))
             w.close()
 
     print("\nCaptures :", ", ".join(sorted(p.name for p in shots.glob("*.png"))))

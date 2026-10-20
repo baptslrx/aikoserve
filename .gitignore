@@ -8,3 +8,4 @@ macos/build/
 macos/build.log
 dist/
 .DS_Store
+php/

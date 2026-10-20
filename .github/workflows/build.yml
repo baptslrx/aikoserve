@@ -46,6 +46,34 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller pillow
+      - name: Télécharger PHP (intégré à l'appli)
+        run: |
+          mkdir -p php
+          if [ "${{ matrix.name }}" = "Windows" ]; then
+            BASE=https://windows.php.net/downloads/releases/
+            FILE=$(curl -fsSL "$BASE" | grep -oE 'php-8\.[34]\.[0-9]+-nts-Win32-vs1[67]-x64\.zip' | sort -V | uniq | tail -1)
+            echo "PHP : $FILE"
+            [ -n "$FILE" ] || { echo "::error::PHP Windows introuvable"; exit 1; }
+            curl -fsSL -o php.zip "$BASE$FILE"
+            powershell -Command "Expand-Archive -Path php.zip -DestinationPath php -Force"
+            rm php.zip
+            cp "$(dirname "$(which python)")/vcruntime140.dll" php/ 2>/dev/null || true
+            ./php/php.exe -v
+          else
+            BASE=https://dl.static-php.dev/static-php-cli/common/
+            if [ "${{ matrix.name }}" = "Mac" ]; then ARCH=macos-aarch64; else ARCH=linux-x86_64; fi
+            FILE=$(curl -fsSL "$BASE" | grep -oE "php-8\.[34]\.[0-9]+-cli-$ARCH\.tar\.gz" | sort -V | uniq | tail -1)
+            echo "PHP : $FILE"
+            if [ -z "$FILE" ]; then
+              echo "::error::PHP $ARCH introuvable sur dl.static-php.dev"
+              curl -fsSL "$BASE" | grep -oE 'php-[^"<> ]+' | sort -u | head -40
+              exit 1
+            fi
+            curl -fsSL "$BASE$FILE" | tar -xz -C php
+            chmod +x php/php
+            ./php/php -v
+            ./php/php -m | tr '\n' ' '
+          fi
       - name: Tests automatiques
         timeout-minutes: 12
         env:
@@ -68,7 +96,7 @@ jobs:
           pyinstaller --noconfirm --windowed --name AikoServe --icon "$ICON" \
             --osx-bundle-identifier fr.aikographic.aikoserve \
             --add-data "../assets/icon-256.png:assets" \
-            --collect-all segno \
+            --collect-all segno --add-data "php:php" \
             run.py
       - name: Archive Windows (installateur + portable)
         if: matrix.name == 'Windows'
